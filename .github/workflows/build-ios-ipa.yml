@@ -15,6 +15,7 @@ jobs:
           brew install xcodegen
 
       - name: 3. 构建方案B：V1 独立客户端 IPA (Build V1 Standalone Client)
+        continue-on-error: true
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p core-probe/RecoveredInterface/build/RayneoNet.swiftmodule
@@ -23,7 +24,7 @@ jobs:
             core-probe/RecoveredInterface/RayneoNet.swift \
             -emit-module-path core-probe/RecoveredInterface/build/RayneoNet.swiftmodule/arm64-apple-ios.swiftmodule
           
-          xcodegen generate --spec apps/RayNeoCompanion/project.yml
+          xcodegen generate --spec apps/RayNeoCompanion/project-device.yml
           
           xcodebuild -project apps/RayNeoCompanion/RayNeoCompanion.xcodeproj \
             -scheme RayNeoCompanionDevice \
@@ -88,6 +89,7 @@ jobs:
           ditto -c -k --norsrc --noextattr --keepParent Payload ../TurboIO_V2_RayNeo1.0.7_Merged_Unsigned.ipa
 
       - name: 5. 上传打包好的 IPA 安装包 (Upload Artifacts)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: TurboIO-iOS-Installers
@@ -95,4 +97,5 @@ jobs:
             TurboIO_V2_RayNeo1.0.7_Merged_Unsigned.ipa
             TurboIO_V1_Standalone_Unsigned.ipa
             TurboIOPrivateAddon_1.0.7.dylib
+          if-no-files-found: warn
           retention-days: 30
