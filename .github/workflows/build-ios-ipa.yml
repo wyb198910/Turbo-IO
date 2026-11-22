@@ -1,0 +1,98 @@
+name: Build Turbo-IO iOS IPA (For Sideloadly)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: 1. 检出源码 (Checkout Repository)
+        uses: actions/checkout@v4
+
+      - name: 2. 安装构建工具 (Install XcodeGen)
+        run: |
+          brew install xcodegen
+
+      - name: 3. 构建方案B：V1 独立客户端 IPA (Build V1 Standalone Client)
+        run: |
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p core-probe/RecoveredInterface/build/RayneoNet.swiftmodule
+          xcrun swiftc -emit-module -parse-as-library -module-name RayneoNet \
+            -target arm64-apple-ios16.0 -sdk "$SDK_PATH" \
+            core-probe/RecoveredInterface/RayneoNet.swift \
+            -emit-module-path core-probe/RecoveredInterface/build/RayneoNet.swiftmodule/arm64-apple-ios.swiftmodule
+          
+          xcodegen generate --spec apps/RayNeoCompanion/project.yml
+          
+          xcodebuild -project apps/RayNeoCompanion/RayNeoCompanion.xcodeproj \
+            -scheme RayNeoCompanionDevice \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_v1 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          
+          mkdir -p output_v1/Payload
+          cp -R build_v1/Build/Products/Release-iphoneos/RayNeoCompanion.app output_v1/Payload/
+          cd output_v1
+          ditto -c -k --norsrc --noextattr --keepParent Payload ../TurboIO_V1_Standalone_Unsigned.ipa
+
+      - name: 4. 构建方案A：V2 官方App 1.0.7 增强融合版 IPA + 插件 Dylib (Build V2 Official 1.0.7 Addon)
+        run: |
+          # 1) 下载高德地图 iOS 依赖包 (AMap SDK)
+          node official-addon/setup-amap.mjs --accept-sdk-terms
+          export TIO_AMAP_SDK_ROOT="$PWD/official-addon/build/amap-sdk"
+          
+          # 2) 编译 iOS 1.0.7 (230) TurboIOPrivateAddon.dylib 插件
+          cd official-addon/ios107-edition
+          TIO_AMAP_ENABLED=1 TIO_IMAGE_RX_LAB=1 TIO_IMAGE_RX_WIDE=1 \
+          TIO_DISPLAY_PHONE=1 TIO_DISPLAY_FLASH=1 TIO_OTA_FLASH_ENABLED=1 \
+          TIO_CLASSIC_BINDINGS=1 bash build.sh embedded com.rayneo.venus.pub
+          cd ../..
+          
+          cp official-addon/ios107-edition/build/image-rx-lab/TurboIOPrivateAddon.dylib ./TurboIOPrivateAddon_1.0.7.dylib
+          
+          # 3) 下载作者 Release 提供的官方 1.0.7(230) 去签名砸壳包并自动融合
+          curl -L --fail -o RayNeo_107.ipa https://github.com/Turbo1123/Turbo-IO/releases/download/rayneo-ios-1.0.7-230/RayNeo_AI_1.0.7_230_decrypted_unsigned_original.ipa
+          unzip -q RayNeo_107.ipa -d raw_107
+          
+          # 使用官方 macho-embed 嵌入 dylib (不改变二进制签名检查)
+          node official-addon/ios107-edition/macho-embed.mjs \
+            "$PWD/raw_107/Payload/Runner.app" \
+            "$PWD/merged_107/Payload/Runner.app" \
+            "$PWD/TurboIOPrivateAddon_1.0.7.dylib" \
+            com.rayneo.venus.pub
+          
+          # 补齐资源与 Info.plist 权限描述
+          APP="$PWD/merged_107/Payload/Runner.app"
+          cp -R official-addon/ios107-edition/TurboIOArt "$APP/TurboIOArt" || true
+          cp -R official-addon/ios107-edition/tests/maps "$APP/TurboHUDMaps"
+          cp official-addon/music/Beans-MIT-LICENSE.txt "$APP/TurboMusic-Beans-MIT-LICENSE.txt"
+          
+          # 注入高德地图 Bundle 资源
+          node -e '
+            import("./official-addon/amap-resources.mjs").then(m => {
+              const res = m.amapResources(process.env.TIO_AMAP_SDK_ROOT);
+              m.copyAMapResources(res, process.argv[1]);
+            });
+          ' "$APP"
+          
+          plutil -replace NSCameraUsageDescription -string "用户主动开启眼镜遥控拍照时取景。" "$APP/Info.plist"
+          plutil -replace NSPhotoLibraryAddUsageDescription -string "用户拍摄后保存照片。" "$APP/Info.plist"
+          plutil -replace NSLocationWhenInUseUsageDescription -string "用于用户主动选择的地图定位和前台步行导航。" "$APP/Info.plist"
+          
+          cd merged_107
+          ditto -c -k --norsrc --noextattr --keepParent Payload ../TurboIO_V2_RayNeo1.0.7_Merged_Unsigned.ipa
+
+      - name: 5. 上传打包好的 IPA 安装包 (Upload Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: TurboIO-iOS-Installers
+          path: |
+            TurboIO_V2_RayNeo1.0.7_Merged_Unsigned.ipa
+            TurboIO_V1_Standalone_Unsigned.ipa
+            TurboIOPrivateAddon_1.0.7.dylib
+          retention-days: 30
